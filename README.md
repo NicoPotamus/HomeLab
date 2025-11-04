@@ -18,3 +18,6 @@ Home Lab Cyber Security Thingz
 ---
 ### SNORT 
 - [Snort](./Snort/README.md)
+
+---
+- [SEED Environment Variables](./EnvironmentVariable/README.md)
