@@ -140,7 +140,7 @@ sudo docker run -d --name loki -p 3100:3100 \
 
 to verify everything is working run docker ps to see if the container is running. My didn't at first due to a malformed config file. I used `docker log loki` to id the issue
 
-The port loki our program exposes is 3100. It is in the docker command after the -p and in the curl command. It uses the api route `IP_ADDR/ready` to signal system is operational.
+The port loki our program exposes is 3100. It is in the docker command after the -p and in the curl command. It uses the api route `/loki/api/v1/push` to accept log data.
 
 ---
 ## Promtail
@@ -165,6 +165,8 @@ sudo docker run -d --name promtail -p 9080:9080 \
 ```
 
 notice how we do the pattern of volume mapping as with loki, but we use a different base image to, one made for promtail.
+
+Promtail is simply just the messenger between the IDPS and Loki the log aggregator. The position file is simply the offset for each log file its monitoring. This prevents promtail from passing duplicate data to loki and lack of data getting to loki. 
 
 I had to download the binaries for an amd64 because I'm running an x86_64 machine. 
 
@@ -284,7 +286,9 @@ From this we can see that we are only getting pinged by ourselves from spotify a
 
 Now lets add and test another rule! To do so just append another rule to the <u>/etc/suricata/rules/local.rules</u> such as:
 
-`alert http any any -> any any (msg:"Alert: Someone is trying to be a 'professional overthinker' on social media instead of working. Get back to the grind!"; content:"tiktok"; nocase; http_header; classtype:policy-violation; sid:9000002; rev:1;)`
+`alert ssh any any -> $HOME_NET 22 (msg:"SSH Connection Attempt Detected"; flow:to_server,established; threshold: type limit, track by_src, count 1, seconds 60; classtype:misc-activity; sid:1000001; rev:1;)`
+
+This rule detects any ssh attempt connections.
 
 Then restart suricata and check your rules syntax:
 
@@ -293,3 +297,48 @@ sudo systemctl restart suricata;
 sudo suricata -T -c /etc/suricata/suricata.yaml -v
 ```
 
+To verify everthing worked I made a few ssh connections from my laptop to the host machine then ran:
+
+`logcli query --addr=http://localhost:3100 --limit=50 --since=1h -o raw '{job="suricata"} |= "alert" |= "SSH" | json | line_format "{{.alert_signature}} | {{.src_ip}} -> {{.dest_ip}}"'`
+Same command structure as before but 
+- `--since` limits the quereies from the previous time specified in this case 1 hour
+- `-o raw` what an output format that I prefered suprisingly
+- Then I fileted by suricata logs, alerts, contains "SSH" 
+- Then formatted everything to be readable the commands json and foward
+
+My output looked like:
+```
+2025/11/26 12:38:26 http://localhost:3100/loki/api/v1/query_range?direction=BACKWARD&end=1764178706076659000&limit=50&query=%7Bjob%3D%22suricata%22%7D+%7C%3D+%22alert%22+%7C%3D+%22SSH%22+%7C+json+%7C+line_format+%22%7B%7B.alert_signature%7D%7D+%7C+%7B%7B.src_ip%7D%7D+-%3E+%7B%7B.dest_ip%7D%7D%22&start=1764175106076659000
+2025/11/26 12:38:26 Common labels: {alert_action="allowed", alert_gid="1", app_proto="ssh", event_type="alert", filename="/var/log/suricata/eve.json", flow_dest_ip="192.168.1.95", flow_dest_port="22", flow_id="1115511291635426", flow_src_ip="68.193.96.196", flow_src_port="54732", flow_start="2025-11-26T12:31:07.325261-0500", in_iface="enp9s0", job="suricata", pkt_src="wire/pcap", proto="TCP", ssh_client_proto_version="2.0", ssh_client_software_version="OpenSSH_9.9", ssh_server_proto_version="2.0", ssh_server_software_version="OpenSSH_9.6p1"}
+SSH Connection Attempt - 192.168.1.95 | 68.193.96.196 -> 192.168.1.95
+SSH Connection Attempt - 192.168.1.95 | 192.168.1.95 -> 68.193.96.196
+SSH Connection Attempt - 192.168.1.95 | 68.193.96.196 -> 192.168.1.95
+ALERT: Multiple SSH Connection Attempts - Possible Brute Force | 68.193.96.196 -> 192.168.1.95
+SSH Connection Attempt - 192.168.1.95 | 192.168.1.95 -> 68.193.96.196
+SSH Connection Attempt - 192.168.1.95 | 68.193.96.196 -> 192.168.1.95
+SSH Connection Attempt - 192.168.1.95 | 192.168.1.95 -> 68.193.96.196
+SSH Connection Attempt - 192.168.1.95 | 68.193.96.196 -> 192.168.1.95
+SSH Connection Attempt - 192.168.1.95 | 192.168.1.95 -> 68.193.96.196
+SSH Connection Attempt - 192.168.1.95 | 68.193.96.196 -> 192.168.1.95
+SSH Connection Attempt - 192.168.1.95 | 192.168.1.95 -> 68.193.96.196
+SSH Connection Attempt - 192.168.1.95 | 68.193.96.196 -> 192.168.1.95
+SSH Connection Attempt - 192.168.1.95 | 192.168.1.95 -> 68.193.96.196
+SSH Connection Attempt - 192.168.1.95 | 68.193.96.196 -> 192.168.1.95
+```
+To make this rule more specific I'd edit the rules to detect failed login attempts and successful attempts rather than just the ping. This is important because if this were a larger scale and our logs were litered with false positives, the true positives are more likely to slip through because of unattentional blindness. 
+
+Now to clean everything up if needed:
+
+```
+sudo docker stop promtail loki;
+sudo docker rm promtail loki; 
+sudo apt purge -y suricata;
+sudo docker prune system prune -a -f
+```
+- Command 1 stops the containers from running
+- Command 2 removes their image from memory
+- Command 3 removes suricata from your host
+- Command 4 removes all other versions and dangling images and stopped containers from your system
+
+
+So in this session we assembled a SIEM (Security Info and Event Management), with the use of 3 components loki, promtail, and suricata. We were able to have end to end detection with logging. This is a great skill to have especially if you're going to manage a server, we get to know whats going on, find what we want to find, and are able to deal with special circumstances thanks to the flexibility of our components.
